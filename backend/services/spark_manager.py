@@ -63,14 +63,10 @@ class SparkManager:
             SparkManager.logger.debug("Params content: %s", params_json)
             args += ["--params-file", params_path]
 
-        try:
-            log_f = open(log_path, "w", encoding="utf-8")
-process = subprocess.Popen(
-    args,
-    stdout=log_f,
-    stderr=log_f,
-    cwd=backend_dir
-)
+         try:
+            with open(log_path, "w", encoding="utf-8") as log_f:
+                process = subprocess.Popen(args, stdout=log_f, stderr=log_f)
+
             SparkManager.JOBS[job_id] = {
                 "status": "RUNNING",
                 "process": process,
@@ -79,10 +75,10 @@ process = subprocess.Popen(
                 "type": job_type,
             }
             return job_id
-        except Exception as e:
-            SparkManager.logger.exception("Failed to submit spark job")
-            raise
 
+        except Exception as e:
+            SparkManager.logger.exception("Failed to submit job")
+            raise
     @staticmethod
     def get_job_status(job_id: str):
         job = SparkManager.JOBS.get(job_id)
