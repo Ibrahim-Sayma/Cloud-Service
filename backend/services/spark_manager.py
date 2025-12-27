@@ -43,14 +43,15 @@ class SparkManager:
         output_path = os.path.join(STORAGE_PATH, f"{job_id}_results.json")
         log_path = os.path.join(STORAGE_PATH, f"{job_id}.log")
 
-        spark_cmd = ["cmd", "/c", "spark-submit"] if os.name == "nt" else ["spark-submit"]
+        python_cmd = ["python"] if os.name == "nt" else ["python3"]
 
         args = [
-            *spark_cmd,
-            script_path,
-            "--input", input_path,
-            "--output", output_path,
-        ]
+       *python_cmd,
+        script_path,
+        "--input", input_path,
+        "--output", output_path,
+         ]
+
 
         if job_type == "ml":
             # Write params to a file to avoid issues with quoting JSON on Windows
@@ -64,8 +65,12 @@ class SparkManager:
 
         try:
             log_f = open(log_path, "w", encoding="utf-8")
-            process = subprocess.Popen(args, stdout=log_f, stderr=log_f)
-
+process = subprocess.Popen(
+    args,
+    stdout=log_f,
+    stderr=log_f,
+    cwd=backend_dir
+)
             SparkManager.JOBS[job_id] = {
                 "status": "RUNNING",
                 "process": process,
