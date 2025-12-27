@@ -4,9 +4,6 @@ import json
 import uuid
 import logging
 import sys
-from typing import Optional
-
-from services.storage import STORAGE_PATH, get_file_path, ensure_storage_dir
 
 JOB_SCRIPTS = {
     "stats": "jobs/stats_job.py",
@@ -14,72 +11,59 @@ JOB_SCRIPTS = {
 }
 
 class SparkManager:
-    JOBS = {}
+    JOBS = {}  # Class attribute to store all jobs
     logger = logging.getLogger("spark_manager")
 
+    # Configure a non-persistent console handler (do not write logs to disk)
     if not logger.handlers:
         ch = logging.StreamHandler(stream=sys.stderr)
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
         ch.setFormatter(fmt)
         logger.addHandler(ch)
+
     logger.setLevel(logging.DEBUG)
-
+    
     @staticmethod
-    def _project_root() -> str:
-        # spark_manager.py is in backend/services -> project root is backend
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
+    def submit_job(job_type: str, filename: str, params: dict = None):
+        if params is None:
+            params = {}
 
-    @staticmethod
-    def _script_path(job_type: str) -> str:
+        job_id = str(uuid.uuid4())
         script_rel = JOB_SCRIPTS.get(job_type)
         if not script_rel:
             raise ValueError(f"Unknown job type: {job_type}")
 
-        backend_dir = SparkManager._project_root()  # backend/
-        script_path = os.path.join(backend_dir, script_rel)  # backend/jobs/...
-        if not os.path.exists(script_path):
-            raise FileNotFoundError(f"Job script not found: {script_path}")
-        return script_path
+        # ✅ absolute paths (مهم جدًا عشان الـ working directory ما يلخبط)
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../backend
+        storage_dir = os.path.abspath(os.path.join(backend_dir, "..", "storage"))
 
-    @staticmethod
-    def submit_job(job_type: str, filename: str, params: Optional[dict] = None):
-        params = params or {}
-        job_id = str(uuid.uuid4())
+        script_path = os.path.join(backend_dir, script_rel)
+        input_path = os.path.join(storage_dir, filename)
+        output_path = os.path.join(storage_dir, f"{job_id}_results.json")
+        log_path = os.path.join(storage_dir, f"{job_id}.log")
 
-        ensure_storage_dir()
-
-        input_path = get_file_path(filename)
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"Input CSV not found: {input_path}")
-
-        output_path = get_file_path(f"{job_id}_results.json")
-        log_path = get_file_path(f"{job_id}.log")
-
-        script_path = SparkManager._script_path(job_type)
-
-        # Use same python running the API (best for DO)
-        python_exec = sys.executable
+        spark_cmd = ["cmd", "/c", "spark-submit"] if os.name == "nt" else ["spark-submit"]
 
         args = [
-            python_exec,
+            *spark_cmd,
             script_path,
             "--input", input_path,
             "--output", output_path,
         ]
 
         if job_type == "ml":
-            params_path = get_file_path(f"{job_id}_params.json")
+            # Write params to a file to avoid issues with quoting JSON on Windows
+            params_path = os.path.join(storage_dir, f"{job_id}_params.json")
+            params_json = json.dumps(params)
             with open(params_path, "w", encoding="utf-8") as pf:
-                json.dump(params, pf)
+                pf.write(params_json)
+            SparkManager.logger.info("Wrote params file for job_id=%s -> %s", job_id, params_path)
+            SparkManager.logger.debug("Params content: %s", params_json)
             args += ["--params-file", params_path]
 
-        SparkManager.logger.info("Launching job_id=%s type=%s", job_id, job_type)
-        SparkManager.logger.debug("CMD: %s", " ".join(args))
-        SparkManager.logger.debug("LOG: %s", log_path)
-
         try:
-            with open(log_path, "w", encoding="utf-8") as log_f:
-                process = subprocess.Popen(args, stdout=log_f, stderr=log_f)
+            log_f = open(log_path, "w", encoding="utf-8")
+            process = subprocess.Popen(args, stdout=log_f, stderr=log_f)
 
             SparkManager.JOBS[job_id] = {
                 "status": "RUNNING",
@@ -89,20 +73,27 @@ class SparkManager:
                 "type": job_type,
             }
             return job_id
-
-        except Exception:
-            SparkManager.logger.exception("Failed to submit job_id=%s", job_id)
+        except Exception as e:
+            print(f"Failed to submit spark job: {e}")
             raise
 
     @staticmethod
     def get_job_status(job_id: str):
-        ensure_storage_dir()
         job = SparkManager.JOBS.get(job_id)
 
-        fallback_path = get_file_path(f"{job_id}_results.json")
+        # If job not tracked in memory, but results file exists on disk,
+        # consider the job completed (handles server restarts).
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        storage_dir = os.path.abspath(os.path.join(backend_dir, "..", "storage"))
+        fallback_path = os.path.join(storage_dir, f"{job_id}_results.json")
 
         if not job:
             if os.path.exists(fallback_path):
+                SparkManager.logger.info(
+                    "Fallback: results file found for job_id=%s -> %s; treating as COMPLETED",
+                    job_id,
+                    fallback_path,
+                )
                 return "COMPLETED"
             return None
 
@@ -112,17 +103,35 @@ class SparkManager:
         else:
             job["status"] = "COMPLETED" if proc.returncode == 0 else "FAILED"
 
+            # If process says completed but the expected output_path was cleaned
+            # or missing, but a results file exists on disk, prefer that file.
+            if job["status"] == "COMPLETED":
+                out = job.get("output_path", "")
+                if not os.path.exists(out) and os.path.exists(fallback_path):
+                    SparkManager.logger.info(
+                        "Process completed but output missing; using fallback results for job_id=%s -> %s",
+                        job_id,
+                        fallback_path,
+                    )
+                    job["output_path"] = fallback_path
+
         return job["status"]
 
     @staticmethod
     def get_job_result(job_id: str):
-        ensure_storage_dir()
         job = SparkManager.JOBS.get(job_id)
-
-        fallback_path = get_file_path(f"{job_id}_results.json")
-
+        # If job not tracked in memory (e.g., server restarted), try to
+        # locate a results file on disk: <storage>/<job_id>_results.json
         if not job:
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            storage_dir = os.path.abspath(os.path.join(backend_dir, "..", "storage"))
+            fallback_path = os.path.join(storage_dir, f"{job_id}_results.json")
             if os.path.exists(fallback_path):
+                SparkManager.logger.info(
+                    "Reading job results from fallback file for job_id=%s -> %s",
+                    job_id,
+                    fallback_path,
+                )
                 with open(fallback_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             return None
@@ -135,5 +144,4 @@ class SparkManager:
         if os.path.exists(output_path):
             with open(output_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-
         return None
