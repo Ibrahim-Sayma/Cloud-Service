@@ -5,11 +5,13 @@ import uuid
 import logging
 import sys
 
-from services.storage import STORAGE_PATH, get_file_path  
+from services.storage import STORAGE_PATH, get_file_path
+
 JOB_SCRIPTS = {
     "stats": "jobs/stats_job.py",
     "ml": "jobs/ml_job.py",
 }
+
 
 class SparkManager:
     JOBS = {}  # Class attribute to store all jobs
@@ -36,7 +38,6 @@ class SparkManager:
         os.makedirs(STORAGE_PATH, exist_ok=True)
 
         backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../backend
-
         script_path = os.path.join(backend_dir, script_rel)
 
         input_path = get_file_path(filename)  # /tmp/storage/<filename>
@@ -46,12 +47,11 @@ class SparkManager:
         python_cmd = ["python"] if os.name == "nt" else ["python3"]
 
         args = [
-       *python_cmd,
-        script_path,
-        "--input", input_path,
-        "--output", output_path,
-         ]
-
+            *python_cmd,
+            script_path,
+            "--input", input_path,
+            "--output", output_path,
+        ]
 
         if job_type == "ml":
             # Write params to a file to avoid issues with quoting JSON on Windows
@@ -59,11 +59,12 @@ class SparkManager:
             params_json = json.dumps(params)
             with open(params_path, "w", encoding="utf-8") as pf:
                 pf.write(params_json)
+
             SparkManager.logger.info("Wrote params file for job_id=%s -> %s", job_id, params_path)
             SparkManager.logger.debug("Params content: %s", params_json)
             args += ["--params-file", params_path]
 
-         try:
+        try:
             with open(log_path, "w", encoding="utf-8") as log_f:
                 process = subprocess.Popen(args, stdout=log_f, stderr=log_f)
 
@@ -76,9 +77,10 @@ class SparkManager:
             }
             return job_id
 
-        except Exception as e:
+        except Exception:
             SparkManager.logger.exception("Failed to submit job")
             raise
+
     @staticmethod
     def get_job_status(job_id: str):
         job = SparkManager.JOBS.get(job_id)
@@ -118,8 +120,6 @@ class SparkManager:
     def get_job_result(job_id: str):
         job = SparkManager.JOBS.get(job_id)
 
-        # If job not tracked in memory (e.g., server restarted), try to
-        # locate a results file on disk: <storage>/<job_id>_results.json
         os.makedirs(STORAGE_PATH, exist_ok=True)
         fallback_path = os.path.join(STORAGE_PATH, f"{job_id}_results.json")
 
@@ -142,4 +142,5 @@ class SparkManager:
         if os.path.exists(output_path):
             with open(output_path, "r", encoding="utf-8") as f:
                 return json.load(f)
+
         return None
