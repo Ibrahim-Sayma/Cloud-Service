@@ -6,7 +6,8 @@ from typing import List
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
-STORAGE_PATH = "../storage"
+STORAGE_PATH = os.getenv("STORAGE_PATH", "/tmp/storage")
+os.makedirs(STORAGE_PATH, exist_ok=True)
 
 @router.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
